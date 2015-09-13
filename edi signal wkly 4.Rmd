@@ -1,0 +1,343 @@
+---
+title: "data preparation"
+output: html_document
+---
+
+A separate function just to allow you to check whether a package is installed
+```{r}
+EnsurePackage <- function(packageName)
+{
+  x <- as.character(packageName)
+  if(!require(x, character.only = TRUE))
+  {
+    install.packages(pkgs = x, 
+                     repos = "http://cran.r-project.org")
+    require(x, character.only = TRUE)
+  }
+} 
+
+```
+
+
+install the packages & library
+```{r}
+#data.table package will allow you to read files fast & delete unecessary lines & allow you to use fread(), which lets you skip lines/rows
+#this is a vital package to have for this progrma particularly
+EnsurePackage('data.table') 
+library(data.table)
+
+#or the following (used this one instead)
+EnsurePackage('xlsx')
+library('xlsx')
+
+#following package allows you to convert table format (long to wide, and vice versa)
+EnsurePackage('tidyr')
+library(tidyr)
+
+```
+
+
+read the edi files in the folder and save into separate dataframes;
+create a master list containing all the dataframes
+
+```{r}
+path <- "~/cisco/LAS project w Suman/DTF/data/csv files/"
+allFiles <- list.files(path = path, pattern = "*.csv")
+
+alldf <- list()
+i <- 1
+
+
+for(file in allFiles)
+{
+  perpos <- which( strsplit( file, "")[[1]]==".")
+  assign(
+  	gsub(" ","",substr(file, 1, perpos-1)), 
+
+  	alldf[[i]] <- read.csv(header=TRUE, skip=5, paste(path, file, sep=""))
+  #skipped the first 5 rows cuz they are nothing but random stuff
+  )
+  i <- i+1
+  print(i)
+}
+
+#remove all unnecessary data
+#rm(allFiles)
+#remove all the individual data created by above code; the individual files created are usually in number date format; e.g. 4-19-2015, 3-16-2015, etc
+rm(list=ls(pattern='[0-9]-[0-9]*'))
+rm(path)
+rm(perpos)
+rm(file)
+rm(i)
+
+
+#create a master list (the smart way to deal w multiple data frames)
+sentDates <- c(gsub(pattern = '.csv', '', allFiles))
+sentDates <- c(gsub(pattern = '-2015$', '', sentDates))
+#allFiles is with .csv at the end
+#sentDates do not have .csv; purely file name
+#alldfName <- sapply(alldfName, function(x) paste('\'',x,'\'',sep=''))
+
+```
+
+
+subsetting each data frame so you'll be dealing w less data
+subset only rows begin w "68, 800, 30" (update 6/22: add TAN 74)
+also grab info from the column of target only (so if we are looking at wk 13, it will filter out column of wk13 forecasts only)
+then i concatenated all the columns containing target week forecasts from diff wks into one data frame
+
+example: subset(dat, grepl("ADN", bName)  &  pName == "2011-02-10_R2" )
+the carrot sign "^" means "begin w/"
+
+```{r}
+#initialize an empty list; alldfR = all df reduced version
+alldfR <- list()
+
+##to identify the target week, there are two methods we can use
+#method 2: 
+# user needs to manually input the target wk name; the only thing manual here
+#must be in this format: "Xdd.Mmm.yy" where dd = two digit date #, Mmm = three letter month name (with first letter being capitalized), and yy = two digit yr #
+targetWk <- 'X22.Jun.15'
+#targetWk <- c('X22.Jun.15', 'x29.Jun.15')
+#'x06.Jul.15', 'x13.Jul.15'
+
+
+#filtering out all TAN starts w 68, 8000, 30, 74, and use rbind to bind them by rows
+for (i in 1:(which( colnames(alldf[[1]]) == targetWk)))
+{
+  temp1 <- subset(alldf[[i]], grepl("^68-", Item.Number))
+  temp2 <- subset(alldf[[i]], grepl("^800-", Item.Number))
+  temp3 <- subset(alldf[[i]], grepl("^30-", Item.Number))
+  temp4 <- subset(alldf[[i]], grepl("^74-", Item.Number))
+    
+  #combine all sections and do rowbinds
+  #and also choose only the item.number and the target columns
+  alldfR[[i]] <- do.call(rbind, 
+                         (list(temp1, temp2, temp3, temp4)))[,c('Item.Number',targetWk)]
+  
+  #get rid of all the TAN versions (since -01 is same TAN as -02 or -03, etc)
+  alldfR[[i]]$Item.Number <- gsub(pattern = '-[0-9][0-9]$', replacement = '', x = alldfR[[i]]$Item.Number) 
+  
+  #lots of the TAN's will have the same name now, so gotta aggregate them by same TAN name (also b/c we got rid of the factory name, or the org name, we are looking at the quantity as a whole, not separately by the orgs)
+    alldfR[[i]] <- aggregate(get(targetWk) ~ Item.Number, FUN = sum, data = alldfR[[i]])
+    
+    #the above code will change the column name to "get(targetColName)", so to change it back to the actual target data name, we need the following line to rename the column to the date that the forecast was predicted
+    names(alldfR[[i]])[2] <- sentDates[i]
+}
+
+test<-alldfR[[1]]
+
+#remove all data w names starting w 'temp'
+rm(list=ls(pattern='temp*'))
+
+#merge all target column values into one data frame
+wkly4cast <- Reduce(function(...) merge(..., by = 'Item.Number', all = TRUE ), alldfR)
+#set all=TRUE will add the rows in despite its "NA" status
+#this code means to merge the dataframes by item.number column
+
+#set the Item.Number to TAN; otherwise its confusing
+colnames(wkly4cast)[1] <- 'TAN'
+
+
+```
+
+
+
+
+read the TAN to PID to PF to BU file
+clean the data up for further usage
+(below is reading files from CW)
+
+```{r}
+
+#read file
+path <- "~/cisco/LAS project w Suman/DTF/data/mapping files/"
+tppb <- read.csv(paste(path,'TAN-PID-PF-BU-TG (CW).csv',sep=''), header = TRUE, sep=',', check.names = TRUE)
+#need to skip a row b/c the top row has like a comment line
+
+#drop useless columns like "subgroup" etc
+colKeep <- c('CPN', 'Product.Family', 'BU')
+tppb <- tppb[, (names(tppb) %in% colKeep)]
+
+#change 'CPN' to 'TAN'
+colnames(tppb)[1] <- 'TAN'
+#change 'Product.Family' to 'PF'
+colnames(tppb)[2] <- 'PF'
+
+#now filter out the rows where TAN #'s begin w 68, 800, 30, or 74
+
+  temp1 <- tppb[grepl("^68-", tppb$TAN),]
+  temp2 <- tppb[grepl("^800-", tppb$TAN),]
+  temp3 <- tppb[grepl("^74-", tppb$TAN),]
+  temp4 <- tppb[grepl("^30-", tppb$TAN),]
+    
+  #combine all sections and do rowbinds
+  #and also choose only the item.number and the target columns
+  tppb <- do.call(rbind, (list(temp1, temp2, temp3, temp4)))
+
+#remove all data w names starting w 'temp'
+rm(list=ls(pattern='temp*'))
+
+#gotta clean up the TAN in this table as well so we can map it to the edi quantities later
+  #get rid of all the TAN versions (since -01 is same TAN as -02 or -03, etc)
+tppb$TAN <- gsub(pattern = '-[0-9][0-9]$', replacement = '', x = tppb$TAN) 
+
+#also clean up the BU section, since everything ends with a '(BU)', rid of it
+tppb$BU <- gsub(pattern = '*\\(BU\\)', replacement = '', x = tppb$BU)
+
+#filter out which ones have duplicates
+duplicates <- tppb[duplicated(tppb$TAN),]
+sortedDup <- duplicates[order(duplicates$TAN, decreasing = FALSE), ]
+
+#remove the TAN's that have mulpitle PID & PF mappings (rows w same TAN name)
+tppb <- tppb[!duplicated(tppb$TAN),]
+
+```
+
+
+1. read the product family to lead time table 
+```{r}
+##step 1
+#read LT mapping file
+path <- "~/cisco/LAS project w Suman/DTF/data/mapping files/"
+LTmap <- read.csv(paste(path,'PF-LTGoal Mapping.csv',sep=''), header = TRUE, sep=',', check.names = TRUE)
+
+#the 2nd column of LT mapping file is the LT in days, which we do not need; so take it out
+LTmap <- LTmap[,-2]
+
+#change 'Product.Family' to 'PF'
+colnames(LTmap)[1] <- 'PF'
+```
+
+
+2. merge the two tables (forecast by wk & tppb table) by TAN
+
+```{r}
+##step 2
+#use merge to merge the two tables by TAN column
+#wkly4cstTANed = weekly forecast mapped to TAN
+wkly4cstTANed <- merge( tppb, wkly4cast, by = 'TAN', all.y = TRUE)
+
+```
+
+
+find out the TAN's that are not mapped to PF (i checked in excel sheets by Suman & CW, they are not found), but still have edi sent out
+```{r}
+#filter out all the TAN's w no PF mapping
+TANwoPF <- wkly4cstTANed[is.na(wkly4cstTANed$PF),]
+
+write.table(TANwoPF, file = '~/cisco/LAS project w Suman/DTF/edi analysis/xtra findings/TAN wo PF.csv', sep=",", row.names = FALSE)
+
+#and remove all these TAN wo PF mappings
+wkly4cstTANed <- wkly4cstTANed[!(wkly4cstTANed$TAN %in% TANwoPF$TAN),]
+```
+
+
+```{r}
+#filter out those with very low edi numbers; 
+#so we'll remove those rows with avrg edi quantities < 20
+wkly4cstTANed <- wkly4cstTANed[(rowSums(wkly4cstTANed[4:length(wkly4cstTANed)], na.rm = TRUE)/(length(wkly4cstTANed)-3)) >= 20, ]
+#2647 items had avrg edi > 15; 4001 were removed
+
+```
+
+
+3. then, merge the resulting table w the LT mapping by Prod.Fam
+4. write the table out to a csv format
+```{r}
+##step 3
+#merge the table w LT mapping
+wklyTANmapLT <- merge(LTmap, wkly4cstTANed, by = 'PF', all.y = TRUE)
+#all.y = TRUE b/c we do want all the wkly4castTANed info to be preserved; not all LT for all the PF were used, so did not set all.x = FALSE
+#also, we know all.y points to wkly4cstTANed b/c thats our 2nd input argument into this 'merge' fxn
+#this step shall not remove any data points
+
+
+#reorder the table
+wklyTANmapLT <- wklyTANmapLT[,c('LT_wk', 'TAN', "PF", "BU", sentDates[1:(length(wklyTANmapLT)-4)])]
+
+#filter out the rows w/o LT (these are obsolete ones)
+TANwoLT <- wklyTANmapLT[is.na(wklyTANmapLT$LT_wk),]
+#write these TAN out cuz they are supposed to be discontinued
+write.table(TANwoLT, file = '~/cisco/LAS project w Suman/DTF/edi analysis/xtra findings/TAN wo LT.csv', sep=",", row.names = FALSE)
+
+
+#clean up the master data to not contain these TAN's wo LT mapping
+wklyTANmapLT <- wklyTANmapLT[complete.cases(wklyTANmapLT$LT_wk),]
+
+targetWkFix <- gsub(pattern = '^[x,X]', replacement = '', x = targetWk)
+
+##step 4
+#write the table; this table will contain all the weekly forecast
+#write.table(wklyTANmapLT, file = '~/cisco/LAS project w Suman/DTF/edi analysis/for dashboard/6-22-2015.csv', sep=",", row.names = FALSE)
+write.xlsx(wklyTANmapLT, file = "C:/Users/ali3/Documents/cisco/LAS project w Suman/DTF/edi analysis/for dashboard/wkly forecast.xlsx", sheetName = targetWkFix, col.names = TRUE, row.names = FALSE, append = TRUE)
+
+##step 5
+#save the result in a rdata format as well to feed into Tableau
+save(wklyTANmapLT, file = '~/cisco/LAS project w Suman/DTF/edi analysis/for dashboard/6-22-2015.RData')
+
+```
+
+
+
+now we need to create charts/analysis/calculation for system error & dp (demand planning) human error
+```{r}
+#first find the unique values of LT wks, then sort them in ascending order
+LTwks <- sort(unique(wklyTANmapLT$LT_wk))
+#then filter out LT  0, which we know is the first one
+LTwks <- LTwks[-1]
+
+
+#filter out data to only include those that has LT >= 3 wks
+majorPFdiff <- subset(x = wklyTANmapLT, subset = (wklyTANmapLT$LT_wk >= LTwks[1]))
+n.diff <- length(majorPFdiff)
+
+#goign to create a result table, that can be expanded w/ calculated results
+#so that my final results can be nicely presented in a table
+results <- data.table(1,2,3,4,5,6, 7)
+setnames(results, c("V1", "V2","V3","V4","V5","V6","V7"), c("target wk", "LT wk", "SO meet goal", "SO meet goal Pct", "both meet goal", "both meet goal Pct", "room for improvement"))
+#another way to set the name is:
+#names(results) <- c("target wk", "LT wk", "SO meet goal", "SO meet goal Pct", "both meet goal", "both meet goal Pct", "room for improvement")
+#however, this is very inefficient as it has to copy the entire table over; so use setnames() is better
+
+#find the absolute diff (for tableau)
+for(i in 1:nrow(majorPFdiff)){
+  #the differences are the target wk subtracting the wk we are analyzing
+  majorPFdiff$diffWkB4LT[i] <- majorPFdiff[i,n.diff] - majorPFdiff[i, (n.diff-majorPFdiff$LT_wk[i])]
+  majorPFdiff$diffWkB4trgt[i] <- majorPFdiff[i,n.diff] - majorPFdiff[i, (n.diff-1)]
+}
+
+#this will reduce/control the number of digits you have in your answer
+options(digits = 5)
+
+for(i in 1:length(LTwks)){
+  wkly4castLT <- majorPFdiff[majorPFdiff$LT_wk == LTwks[i], ]
+  
+  SOmeetGoal <- ifelse(wkly4castLT$diffWkB4trgt >= 0, 'yes', 'no' )
+  tableSO <- table(SOmeetGoal)
+  bothMeetGoal <- ifelse(wkly4castLT$diffWkB4LT >= 0 | wkly4castLT$diffWkB4trgt >= 0, 'yes', 'no')
+  tableBoth <- table(bothMeetGoal)
+
+
+  #add the calculated numbers to the results table
+  SOmeetGoal <- tableSO["yes"]
+  SOmeetGoalPct <- tableSO["yes"] / sum(tableSO) *100
+  bothMeetGoal <- tableBoth["yes"]
+  bothMeetGoalPct <- tableBoth["yes"] / sum(tableBoth) *100
+  rm4Improve <- results$`both meet goal Pct`[i] - results$`SO meet goal Pct`[i]
+  
+  row2badd <- list(targetWkFix, LTwks[i], SOmeetGoal, SOmeetGoalPct, bothMeetGoal, bothMeetGoalPct, rm4Improve)
+  
+  #finally modify the result table by row bind method
+  results <- rbind(results, row2badd)
+}
+
+#finally, get rid of the 1st row, which was a placeholder when you first created the data table
+results <- results[-1]
+
+write.xlsx(bkByTAN[[j]], file = "~/cisco/LAS project w Suman/DTF/edi analysis/for dashboard/wkly forecast.xlsx", sheetName = targetWk, col.names = TRUE, row.names = FALSE, append = TRUE)
+
+```
+
+
+
